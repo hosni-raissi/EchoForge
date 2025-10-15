@@ -1,0 +1,1 @@
+TARGET_TYPES = ["person","email","phone","other"]

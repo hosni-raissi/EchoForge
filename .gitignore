@@ -1,0 +1,8 @@
+
+.env
+.venv/
+__pycache__/
+utils/__pycache__/
+app/__pycache__/
+lib/__pycache__/
+test.py

@@ -1,0 +1,7 @@
+google.generativeai
+dotenv
+requests
+aiohttp
+bs4
+phonenumbers
+email-validator
