@@ -5,3 +5,6 @@ aiohttp
 bs4
 phonenumbers
 email-validator
+fastapi
+uvicorn
+python-multipart

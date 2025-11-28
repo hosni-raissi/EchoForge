@@ -45,9 +45,21 @@ class DorkGenerator:
             'social_media': f'"{target}" (site:facebook.com OR site:linkedin.com)',
             'simple': f'"{target}"'
         }
+
+    @staticmethod
+    def generate_dark_web_dorks(target: str) -> Dict[str, str]:
+        return {
+            'onion_proxies': f'"{target}" (site:onion.link OR site:onion.ws OR site:tor2web.org OR site:onion.pet OR site:onion.dog)',
+            'leaks_dumps': f'"{target}" (site:pastebin.com OR site:ghostbin.com OR site:justpaste.it OR site:rentry.co OR "leaked database" OR "dump" OR "breach")',
+            'darknet_markets': f'"{target}" ("darknet" OR "market" OR "silk road" OR "alpha bay" OR "hydra" OR "dream market")',
+            'hacking_forums': f'"{target}" (site:raidforums.com OR site:breached.vc OR "hacking forum" OR "carding")',
+        }
     
     @staticmethod
-    def generate_dorks(target: str, target_type: str) -> Dict[str, str]:
+    def generate_dorks(target: str, target_type: str, options: Dict[str, bool] = None) -> Dict[str, str]:
+        if options is None:
+            options = {}
+
         generators = {
             'person': DorkGenerator.generate_person_dorks,
             'email': DorkGenerator.generate_email_dorks,
@@ -56,5 +68,16 @@ class DorkGenerator:
         
         generator = generators.get(target_type, DorkGenerator.generate_person_dorks)
         dorks = generator(target)
+
+        # Filter social media if disabled
+        if not options.get('social_media', True):
+            keys_to_remove = ['twitter_x', 'facebook', 'instagram', 'linkedin_profiles', 'social_mentions', 'social_media']
+            for k in keys_to_remove:
+                dorks.pop(k, None)
+
+        # Add Dark Web dorks if enabled
+        if options.get('dark_web', False):
+            dorks.update(DorkGenerator.generate_dark_web_dorks(target))
+        
         # Filter out empty queries
         return {k: v for k, v in dorks.items() if v}

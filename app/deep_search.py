@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import hashlib
+import random
 from typing import Dict, Any, List, Set, Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -28,13 +29,14 @@ logger = logging.getLogger(__name__)
 # ==================== Configuration ====================
 @dataclass
 class SearchConfig:
-    max_results_per_dork: int = 50
-    max_concurrent_requests: int = 5
+    max_results_per_dork: int = 20
+    max_concurrent_requests: int = 1
     quota_limit: int = 100
     quota_warning_threshold: float = 0.8
     request_timeout: int = 30
     retry_attempts: int = 3
-    retry_delay: float = 2.0
+    retry_delay: float = 4.0
+    request_delay: float = 2.0  # Minimum delay between API requests
     cache_ttl: int = 3600  # 1 hour
     enable_fallback_browse: bool = True
     enable_entity_extraction: bool = True
@@ -42,6 +44,9 @@ class SearchConfig:
     min_snippet_length: int = 50
     
 config = SearchConfig()
+
+# Global lock for API rate limiting
+api_rate_limit_lock = asyncio.Lock()
 
 # ==================== Quota & Rate Limiting ====================
 class QuotaManager:
@@ -229,6 +234,59 @@ class WebScraper:
         except Exception as e:
             return {'error': str(e), 'url': url}
 
+# ==================== Ahmia Search ====================
+class AhmiaSearcher:
+    BASE_URL = "https://ahmia.fi/search/"
+    
+    @staticmethod
+    async def search(session: aiohttp.ClientSession, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
+        try:
+            params = {'q': query}
+            async with session.get(AhmiaSearcher.BASE_URL, params=params, timeout=15) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    
+                    # Ahmia results structure usually is <li class="result">
+                    for result in soup.select('li.result'):
+                        if len(results) >= max_results:
+                            break
+                            
+                        link_tag = result.find('a')
+                        if not link_tag:
+                            continue
+                            
+                        url = link_tag.get('href')
+                        title = link_tag.get_text(strip=True)
+                        snippet_tag = result.find('p')
+                        snippet = snippet_tag.get_text(strip=True) if snippet_tag else ""
+                        
+                        results.append({
+                            'title': title,
+                            'link': url,
+                            'snippet': snippet,
+                            'displayLink': 'ahmia.fi (Onion)',
+                            'source': 'dark_web_ahmia',
+                            'relevance_score': 0  # Will be calculated later
+                        })
+                    return results
+        except Exception as e:
+            logger.error(f"Ahmia search failed: {e}")
+            return []
+        return []
+
+async def execute_ahmia_search(session: aiohttp.ClientSession, target: str, max_results: int) -> Dict[str, Any]:
+    """Execute Ahmia search and format as dork result."""
+    results = await AhmiaSearcher.search(session, target, max_results)
+    return {
+        'dork_name': 'ahmia_dark_web',
+        'query': target,
+        'total_results': len(results),
+        'pages_fetched': 1,
+        'results': results
+    }
+
 # ==================== Result Scoring & Ranking ====================
 class ResultScorer:
     @staticmethod
@@ -314,9 +372,13 @@ async def fetch_search_results(
     }
     
     try:
-        result = await retry_async(
-            lambda: session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=config.request_timeout))
-        )
+        async with api_rate_limit_lock:
+            # Enforce rate limiting delay
+            await asyncio.sleep(config.request_delay)
+            
+            result = await retry_async(
+                lambda: session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=config.request_timeout))
+            )
         
         async with result as resp:
             if resp.status == 200:
@@ -430,7 +492,10 @@ async def deep_search(
     target_type: str = 'person',
     max_results_per_dork: int = 50,
     enable_dedup: bool = True,
-    enable_ranking: bool = True
+    enable_ranking: bool = True,
+    deep_search_enabled: bool = False,
+    dark_web_enabled: bool = False,
+    social_media_enabled: bool = True
 ) -> Dict[str, Any]:
     """
     Advanced OSINT deep search with comprehensive features.
@@ -441,6 +506,9 @@ async def deep_search(
         max_results_per_dork: Maximum results per dork query
         enable_dedup: Enable result deduplication
         enable_ranking: Enable relevance scoring and ranking
+        deep_search_enabled: Enable deep search mode
+        dark_web_enabled: Enable dark web dorks
+        social_media_enabled: Enable social media dorks
     
     Returns:
         Comprehensive search results with metadata
@@ -461,7 +529,12 @@ async def deep_search(
     logger.info(f"Starting deep search: target='{target}', type='{target_type}'")
     
     # Generate dorks
-    dorks = DorkGenerator.generate_dorks(target, target_type)
+    options = {
+        'deep_search': deep_search_enabled,
+        'dark_web': dark_web_enabled,
+        'social_media': social_media_enabled
+    }
+    dorks = DorkGenerator.generate_dorks(target, target_type, options)
     logger.info(f"Generated {len(dorks)} dork queries")
     
     # Execute all dorks concurrently
@@ -472,6 +545,10 @@ async def deep_search(
             )
             for dork_name, query in dorks.items()
         ]
+        
+        # Add Dark Web specific search if enabled
+        if dark_web_enabled:
+            tasks.append(execute_ahmia_search(session, target, max_results_per_dork))
         
         dork_results = await asyncio.gather(*tasks, return_exceptions=True)
     
